@@ -6,7 +6,8 @@ use serde_json::Serializer;
 use serde_json::ser::PrettyFormatter;
 use std::env;
 use std::fs;
-use std::io::{BufWriter, Read, Write};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+use std::panic;
 use std::path::{Path, PathBuf};
 
 // ---------- ANSI 颜色常量 ----------
@@ -19,6 +20,7 @@ const RESET: &str = "\x1b[0m";
 // ---------- 固定常量 ----------
 const HOST_NAME: &str = "top.hugstars.native_message";
 const FOLDER_NAME: &str = ".native_message";
+const MAX_RESPONSE_SIZE: usize = 1024 * 1024; // 1MB
 
 // ---------- 数据结构 ----------
 #[derive(Debug, Deserialize)]
@@ -27,6 +29,10 @@ struct Request {
     content: Option<String>,
     #[serde(default = "default_encoding")]
     encoding: String,
+    #[serde(default)]
+    offset: Option<u64>,
+    #[serde(default)]
+    length: Option<u64>,
 }
 
 fn default_encoding() -> String {
@@ -35,7 +41,7 @@ fn default_encoding() -> String {
 
 #[derive(Debug, Serialize)]
 struct Response {
-    status: String,
+    status: String, // "ok" 或 "error"
     content: Option<String>,
     message: Option<String>,
     size: Option<u64>,
@@ -50,7 +56,7 @@ fn exe_dir() -> Result<PathBuf> {
     Ok(dir.to_path_buf())
 }
 
-// ---------- 路径解析：相对路径转为 exe 目录下的绝对路径 ----------
+// ---------- 路径解析 ----------
 fn resolve_path(raw: &str) -> PathBuf {
     let p = Path::new(raw);
     if p.is_absolute() {
@@ -61,7 +67,7 @@ fn resolve_path(raw: &str) -> PathBuf {
     }
 }
 
-// ---------- 路径安全校验（仅限用户主目录） ----------
+// ---------- 路径安全校验 ----------
 fn is_path_allowed(requested_path: &str) -> bool {
     let home = match dirs::home_dir() {
         Some(h) => h,
@@ -78,30 +84,97 @@ fn is_path_allowed(requested_path: &str) -> bool {
 }
 
 // ---------- 处理读取 ----------
-fn handle_read(file_path: &str, encoding: &str) -> Response {
-    match fs::read(file_path) {
-        Ok(data) => {
-            let content_encoded = if encoding == "text" {
-                match String::from_utf8(data.clone()) {
-                    Ok(text) => text,
-                    Err(_) => BASE64.encode(&data),
-                }
-            } else {
-                BASE64.encode(&data)
+fn handle_read(
+    file_path: &str,
+    encoding: &str,
+    offset: Option<u64>,
+    length: Option<u64>,
+) -> Response {
+    // 1. 打开文件
+    let file = match fs::File::open(file_path) {
+        Ok(f) => f,
+        Err(e) => {
+            return Response {
+                status: "error".to_string(),
+                content: None,
+                message: Some(format!("打开文件失败：{}", e)),
+                size: None,
             };
-            Response {
-                status: "ok".to_string(),
-                content: Some(content_encoded),
-                message: None,
-                size: Some(data.len() as u64),
-            }
         }
-        Err(e) => Response {
+    };
+
+    // 2. 获取文件大小
+    let total_size = match file.metadata() {
+        Ok(m) => m.len(),
+        Err(e) => {
+            return Response {
+                status: "error".to_string(),
+                content: None,
+                message: Some(format!("获取文件大小失败：{}", e)),
+                size: None,
+            };
+        }
+    };
+
+    // 3. 确定读取范围
+    let start = offset.unwrap_or(0);
+    let mut read_len = length.unwrap_or(total_size);
+    if start >= total_size {
+        return Response {
             status: "error".to_string(),
             content: None,
-            message: Some(format!("读取失败: {}", e)),
-            size: None,
-        },
+            message: Some("偏移量超出文件大小".to_string()),
+            size: Some(total_size),
+        };
+    }
+    if start + read_len > total_size {
+        read_len = total_size - start;
+    }
+    if read_len == 0 {
+        return Response {
+            status: "ok".to_string(),
+            content: Some("".to_string()),
+            message: None,
+            size: Some(total_size),
+        };
+    }
+
+    // 4. 定位并读取
+    let mut file = file;
+    if let Err(e) = file.seek(SeekFrom::Start(start)) {
+        return Response {
+            status: "error".to_string(),
+            content: None,
+            message: Some(format!("定位文件失败：{}", e)),
+            size: Some(total_size),
+        };
+    }
+
+    let mut buffer = vec![0u8; read_len as usize];
+    if let Err(e) = file.read_exact(&mut buffer) {
+        return Response {
+            status: "error".to_string(),
+            content: None,
+            message: Some(format!("读取文件失败：{}", e)),
+            size: Some(total_size),
+        };
+    }
+
+    // 5. Base64 编码
+    let content_encoded = if encoding == "text" {
+        match String::from_utf8(buffer.clone()) {
+            Ok(text) => text,
+            Err(_) => BASE64.encode(&buffer),
+        }
+    } else {
+        BASE64.encode(&buffer)
+    };
+
+    Response {
+        status: "ok".to_string(),
+        content: Some(content_encoded),
+        message: None,
+        size: Some(total_size),
     }
 }
 
@@ -110,7 +183,14 @@ fn handle_write(file_path: &str, content_b64: &str) -> Response {
     match BASE64.decode(content_b64) {
         Ok(data) => {
             if let Some(parent) = Path::new(file_path).parent() {
-                let _ = fs::create_dir_all(parent);
+                if let Err(e) = fs::create_dir_all(parent) {
+                    return Response {
+                        status: "error".to_string(),
+                        content: None,
+                        message: Some(format!("创建父目录失败：{}", e)),
+                        size: None,
+                    };
+                }
             }
             match fs::write(file_path, &data) {
                 Ok(_) => Response {
@@ -122,7 +202,7 @@ fn handle_write(file_path: &str, content_b64: &str) -> Response {
                 Err(e) => Response {
                     status: "error".to_string(),
                     content: None,
-                    message: Some(format!("写入失败: {}", e)),
+                    message: Some(format!("写入文件失败：{}", e)),
                     size: None,
                 },
             }
@@ -130,43 +210,69 @@ fn handle_write(file_path: &str, content_b64: &str) -> Response {
         Err(e) => Response {
             status: "error".to_string(),
             content: None,
-            message: Some(format!("Base64 解码失败: {}", e)),
+            message: Some(format!("Base64 解码失败：{}", e)),
             size: None,
         },
     }
 }
 
-// ---------- 处理请求（入口） ----------
-fn handle_request(request: Request) -> Response {
-    // 1. 解析路径（相对路径 → exe 目录下）
+// ---------- 处理请求 ----------
+fn process_request(request: Request) -> Response {
+    // 解析路径
     let full_path = resolve_path(&request.file_path);
     let full_path_str = full_path.to_string_lossy().to_string();
 
-    // 2. 安全检查：必须在用户主目录下
+    // 安全检查
     if !is_path_allowed(&full_path_str) {
         return Response {
             status: "error".to_string(),
             content: None,
-            message: Some("拒绝访问：路径必须在用户主目录下".to_string()),
+            message: Some("拒绝访问：路径必须在.native_message目录下".to_string()),
             size: None,
         };
     }
 
-    // 3. 根据是否有 content 字段决定读取或写入
+    // 根据是否有 content 字段决定读写
     if let Some(content_b64) = request.content {
         handle_write(&full_path_str, &content_b64)
     } else {
-        handle_read(&full_path_str, &request.encoding)
+        handle_read(
+            &full_path_str,
+            &request.encoding,
+            request.offset,
+            request.length,
+        )
     }
 }
 
-// ---------- 发送响应 ----------
+// ---------- 发送响应（带大小检查） ----------
 fn send_response(response: &Response) -> Result<()> {
-    let json = serde_json::to_string(response)?;
+    // 先尝试序列化
+    let json = serde_json::to_string(response).map_err(|e| anyhow!("序列化响应失败：{}", e))?;
     let json_bytes = json.as_bytes();
-    let len =
-        u32::try_from(json_bytes.len()).map_err(|_| anyhow!("响应 JSON 过大（超过 u32::MAX）"))?;
 
+    // 如果响应大小超过限制，构造一个简化的错误响应
+    if json_bytes.len() > MAX_RESPONSE_SIZE {
+        let error_resp = Response {
+            status: "error".to_string(),
+            content: None,
+            message: Some("响应数据过大，请使用分片读取（传入 offset 和 length）".to_string()),
+            size: None,
+        };
+
+        let error_json = serde_json::to_string(&error_resp)?;
+        let error_bytes = error_json.as_bytes();
+
+        let len = u32::try_from(error_bytes.len())?;
+        let mut writer = BufWriter::new(std::io::stdout().lock());
+        writer.write_all(&len.to_le_bytes())?;
+        writer.write_all(error_bytes)?;
+        writer.flush()?;
+        return Ok(());
+    }
+
+    // 正常发送
+    let len = u32::try_from(json_bytes.len())?;
     let stdout = std::io::stdout();
     let mut writer = BufWriter::new(stdout.lock());
     writer.write_all(&len.to_le_bytes())?;
@@ -175,9 +281,8 @@ fn send_response(response: &Response) -> Result<()> {
     Ok(())
 }
 
-// ---------- 初始化（init）----------
+// ---------- 初始化 ----------
 fn init_installation() -> Result<()> {
-    // 1. 创建文件夹
     let home = dirs::home_dir().ok_or_else(|| anyhow!("无法获取用户主目录"))?;
     let install_dir = home.join(FOLDER_NAME);
     if !install_dir.exists() {
@@ -185,34 +290,29 @@ fn init_installation() -> Result<()> {
     }
     println!("{}[成功]{} 软件目录已创建", GREEN, RESET);
 
-    // 2. 获取当前 EXE 路径并复制到安装目录
     let current_exe = env::current_exe()?;
     let exe_filename = current_exe
         .file_name()
         .ok_or_else(|| anyhow!("无法获取 EXE 文件名"))?;
     let target_exe = install_dir.join(exe_filename);
-
     if current_exe != target_exe {
         fs::copy(&current_exe, &target_exe)?;
     }
     println!("{}[成功]{} 软件已复制", GREEN, RESET);
 
-    // 3. 清单中的 path 使用目标路径
     let exe_str = target_exe.to_string_lossy().replace('\\', "\\\\");
 
-    // 4. 生成宿主清单（使用 4 空格缩进）
     let manifest = serde_json::json!({
         "name": HOST_NAME,
         "description": "在用户主目录下读写文件",
         "path": exe_str,
         "type": "stdio",
         "allowed_origins": [
-            "chrome-extension://YOUR_EXTENSION_ID/"
+            "chrome-extension://这里填入你的Chrome插件的ID/"
         ]
     });
     let manifest_path = install_dir.join(format!("{}.json", HOST_NAME));
 
-    // 自定义缩进为 4 空格
     let mut buffer = Vec::new();
     let formatter = PrettyFormatter::with_indent(b"    ");
     let mut serializer = Serializer::with_formatter(&mut buffer, formatter);
@@ -220,7 +320,6 @@ fn init_installation() -> Result<()> {
     fs::write(&manifest_path, &buffer)?;
     println!("{}[成功]{} 已写入清单文件", GREEN, RESET);
 
-    // 5. 写入 Native Messaging 注册表
     let reg_key = format!(
         "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\{}",
         HOST_NAME
@@ -271,8 +370,20 @@ fn main() -> Result<()> {
         return init_installation();
     }
 
-    // Native Messaging 主循环
+    // 设置 panic 钩子
+    panic::set_hook(Box::new(|panic_info| {
+        let msg = if let Some(s) = panic_info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+            s.to_string()
+        } else {
+            "未知的内部错误".to_string()
+        };
+        eprintln!("{}[错误]{} 程序异常：{}", RED, RESET, msg);
+    }));
+
     loop {
+        // 读取消息长度
         let mut len_buf = [0u8; 4];
         if std::io::stdin().read_exact(&mut len_buf).is_err() {
             break;
@@ -280,8 +391,30 @@ fn main() -> Result<()> {
         let len = u32::from_le_bytes(len_buf) as usize;
 
         let mut buffer = vec![0u8; len];
-        std::io::stdin().read_exact(&mut buffer)?;
-        let request_str = String::from_utf8(buffer)?;
+        if let Err(e) = std::io::stdin().read_exact(&mut buffer) {
+            let resp = Response {
+                status: "error".to_string(),
+                content: None,
+                message: Some(format!("读取请求数据失败：{}", e)),
+                size: None,
+            };
+            let _ = send_response(&resp);
+            continue;
+        }
+
+        let request_str = match String::from_utf8(buffer) {
+            Ok(s) => s,
+            Err(e) => {
+                let resp = Response {
+                    status: "error".to_string(),
+                    content: None,
+                    message: Some(format!("无效的 UTF-8 编码：{}", e)),
+                    size: None,
+                };
+                let _ = send_response(&resp);
+                continue;
+            }
+        };
 
         let request: Request = match serde_json::from_str(&request_str) {
             Ok(req) => req,
@@ -289,16 +422,26 @@ fn main() -> Result<()> {
                 let resp = Response {
                     status: "error".to_string(),
                     content: None,
-                    message: Some(format!("无效的 JSON: {}", e)),
+                    message: Some(format!("无效的 JSON 格式：{}", e)),
                     size: None,
                 };
-                send_response(&resp)?;
+                let _ = send_response(&resp);
                 continue;
             }
         };
 
-        let response = handle_request(request);
-        send_response(&response)?;
+        let response =
+            panic::catch_unwind(|| process_request(request)).unwrap_or_else(|_| Response {
+                status: "error".to_string(),
+                content: None,
+                message: Some("处理请求时发生内部错误".to_string()),
+                size: None,
+            });
+
+        // 发送响应（内部已处理大小超限）
+        if let Err(e) = send_response(&response) {
+            eprintln!("{}[错误]{} 发送响应失败：{}", RED, RESET, e);
+        }
     }
     Ok(())
 }
