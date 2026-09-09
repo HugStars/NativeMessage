@@ -29,7 +29,7 @@
 
 ## 🚀 安装与部署
 
-### 1. 编译 或 直接下载成品exe
+### 1. 编译 或 直接下载[EXE](https://github.com/HugStars/NativeMessage/releases)
 
 ```bash
 cargo build --release
