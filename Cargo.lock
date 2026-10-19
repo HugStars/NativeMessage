@@ -9,6 +9,7 @@ dependencies = [
  "anyhow",
  "base64",
  "dirs",
+ "libc",
  "serde",
  "serde_json",
 ]

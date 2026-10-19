@@ -2,7 +2,7 @@
 
 ## 📖 项目简介
 
-`NativeMessage` 是一个用 Rust 编写的 **Chrome 扩展 Native Messaging 主机**，为浏览器扩展提供安全、高效的**本地文件读写能力**。通过本工具，扩展可以在用户主目录下的 `.native_message` 文件夹中安全地读写文件（包括文本、图片、Excel 等二进制文件），并支持**大文件自动分片读取**，完美规避 Chrome 的消息大小限制。
+`NativeMessage` 是一个用 Rust 编写的 **Chrome 扩展 Native Messaging 主机**，为浏览器扩展提供安全、高效的**本地文件读写能力**。通过本工具，扩展可以在用户本地数据目录 `%LOCALAPPDATA%\NativeMessage`（即 `C:\Users\用户名\AppData\Local\NativeMessage`）中安全地读写文件（包括文本、图片、Excel 等二进制文件），并支持**大文件自动分片读取**，完美规避 Chrome 的消息大小限制。
 
 ---
 
@@ -12,8 +12,9 @@
 - ✅ **自动分片读取**：`readFileWhole` 自动处理大文件，无需手动分片。
 - ✅ **手动分片控制**：`readFile` 支持指定 `offset`/`length`，灵活应对各种场景。
 - ✅ **Base64 传输**：所有文件内容以 Base64 格式传输，完美兼容二进制数据。
-- ✅ **固定安全目录**：所有文件操作严格限制在 `%USERPROFILE%/.native_message` 目录下，避免越权访问。
-- ✅ **一键安装部署**：`init` 命令自动完成所有安装步骤。
+- ✅ **固定安全目录**：所有文件操作严格限制在 `%LOCALAPPDATA%\NativeMessage` 数据目录下，避免越权访问。
+- ✅ **一键安装部署**：直接运行 EXE 并输入 `init` 即可完成全部安装步骤，支持交互式输入扩展 ID。
+- ✅ **旧版数据自动迁移**：`init` 会自动把旧版 `%USERPROFILE%\.native_message` 中的文件迁移到新目录。
 - ✅ **响应大小保护**：自动拒绝发送超过 1MB 的响应，避免通信崩溃。
 - ✅ **中文错误提示**：所有错误信息以中文返回给扩展，便于调试。
 
@@ -29,7 +30,9 @@
 
 ## 🚀 安装与部署
 
-### 1. 编译 或 直接下载[EXE](https://github.com/HugStars/NativeMessage/releases)
+### 1. 获取软件
+
+#### 方法一：自行编译
 
 ```bash
 cargo build --release
@@ -37,27 +40,39 @@ cargo build --release
 
 编译产物位于 `target/release/NativeMessage.exe`（Windows）或 `NativeMessage`（Linux/macOS）。
 
+#### 方法二：GitHub releases直接下载[EXE](https://github.com/HugStars/NativeMessage/releases)
+
+#### 方法三：软件分发下载[EXE](https://files.hugstars.top/windows/NativeMessage.exe) 
+
 ### 2. 安装（运行 `init`）
 
-将可执行文件放置到任意固定位置，然后执行：
+将可执行文件放置到任意位置，然后**直接运行**，在窗口中输入 `init` 并回车：
 
-```bash
-# Windows
-NativeMessage.exe init
+```
+NativeMessage
 
-# Linux/macOS
-./NativeMessage init
+NativeMessage - 浏览器插件本地存储桥
+数据目录: C:\Users\用户名\AppData\Local\NativeMessage
+
+输入 init 并回车完成安装；直接关闭本窗口退出。
+> init
 ```
 
-该命令自动完成：
-- 在用户主目录创建 `.native_message` 文件夹
-- 将自身复制到该文件夹
-- 生成 `top.hugstars.native_message.json` 清单文件
+也支持命令行方式：`NativeMessage.exe init`（效果相同）。
+
+`init` 自动完成：
+- 在 `%LOCALAPPDATA%` 下创建 `NativeMessage` 数据目录
+- 将自身复制到该目录
+- 把旧版 `%USERPROFILE%\.native_message` 中的用户数据迁移到新目录（如存在）
+- 生成 `top.hugstars.native_message.json` 清单文件（自动复用已配置的扩展 ID）
 - 写入注册表（Windows）或配置文件（macOS/Linux 需手动配置）
+- 提示输入扩展 ID 并写入清单文件
 
-### 3. 修改扩展 ID
+### 3. 输入扩展 ID
 
-编辑 `~/.native_message/top.hugstars.native_message.json`，将 `allowed_origins` 中的 `这里填入你的Chrome插件的ID` 替换为您的扩展实际 ID（在 `chrome://extensions` 中查看）。
+`init` 结束时会提示输入 Chrome 扩展 ID（32 位小写字母 a-p，可在 `chrome://extensions` 中查看），直接输入并回车即可写入清单文件；直接回车则跳过。
+
+也可以随时手动编辑 `%LOCALAPPDATA%\NativeMessage\top.hugstars.native_message.json` 修改 `allowed_origins`。
 
 ### 4. 重启浏览器或重新加载扩展
 
@@ -205,22 +220,22 @@ function writeFile(filePath, base64Data) {
 
 ### 📂 文件存储位置（重要）
 
-**当前版本仅支持读写 `%USERPROFILE%\.native_message` 目录下的文件**，这是为了确保安全和统一管理。
+**当前版本仅支持读写 `%LOCALAPPDATA%\NativeMessage` 数据目录下的文件**，这是为了确保安全和统一管理。
 
-- 您在使用 `readFile` 或 `writeFile` 时，**无论传入的是绝对路径还是相对路径**，最终都会映射到 `.native_message` 目录。
+- 您在使用 `readFile` 或 `writeFile` 时，**无论传入的是绝对路径还是相对路径**，最终都会映射到 `NativeMessage` 数据目录。
 - 因此，**强烈建议直接使用文件名（相对路径）** 来操作文件，例如：
 
 ```javascript
 // ✅ 推荐：直接使用文件名
-await readFile("config.json")        // 实际读取 C:/Users/用户名/.native_message/config.json
-await writeFile("data.db", base64)   // 写入 C:/Users/用户名/.native_message/data.db
+await readFile("config.json")        // 实际读取 C:/Users/用户名/AppData/Local/NativeMessage/config.json
+await writeFile("data.db", base64)   // 写入 C:/Users/用户名/AppData/Local/NativeMessage/data.db
 
-// ⚠️ 不推荐：绝对路径也会被重定向到 .native_message
+// ⚠️ 不推荐：数据目录以外的绝对路径会被拒绝访问
 await readFile("C:/Users/用户名/Desktop/photo.jpg")  
-// 实际仍会尝试读取 C:/Users/用户名/.native_message/photo.jpg（如果不存在则报错）
+// 实际仍会尝试读取 C:/Users/用户名/AppData/Local/NativeMessage/photo.jpg（如果不存在则报错）
 ```
 
-> **注意**：如果您传入的绝对路径指向 `.native_message` 以外的位置，主机可能会拒绝访问或找不到文件。请始终使用文件名操作。
+> **注意**：如果您传入的绝对路径指向数据目录以外的位置，主机会拒绝访问或找不到文件。请始终使用文件名操作。
 
 ---
 
@@ -228,13 +243,14 @@ await readFile("C:/Users/用户名/Desktop/photo.jpg")
 
 您可以在系统文件管理器中直接访问该目录：
 
-- Windows：`C:\Users\你的用户名\.native_message`
-- macOS/Linux：`/Users/你的用户名/.native_message`
+- Windows：`C:\Users\你的用户名\AppData\Local\NativeMessage`
+- macOS：`/Users/你的用户名/Library/Application Support/NativeMessage`
+- Linux：`/home/你的用户名/.local/share/NativeMessage`
 
 您也可以手动创建子文件夹来组织文件，例如：
 
 ```javascript
-await writeFile("images/avatar.png", base64)  // 写入 .native_message/images/avatar.png
+await writeFile("images/avatar.png", base64)  // 写入 NativeMessage/images/avatar.png
 ```
 
 ---
@@ -309,7 +325,7 @@ await writeFile("data.xlsx", base64)
 
 ## 🔒 安全性说明
 
-- **路径限制**：所有操作均限定在 `%USERPROFILE%/.native_message` 目录下，防止越权访问。
+- **路径限制**：所有操作均限定在 `%LOCALAPPDATA%/NativeMessage` 数据目录下，防止越权访问。
 - **响应大小保护**：响应 JSON 超过 1MB 时，自动返回错误信息，防止进程崩溃。
 - **扩展白名单**：清单文件中的 `allowed_origins` 仅允许指定扩展 ID 访问。
 
@@ -319,7 +335,7 @@ await writeFile("data.xlsx", base64)
 
 - **消息格式**：`[4字节小端长度][UTF-8 JSON]`
 - **请求字段**：
-  - `file_path` (string)：文件路径（相对路径以 `.native_message` 为基准）
+  - `file_path` (string)：文件路径（相对路径以 `NativeMessage` 数据目录为基准）
   - `content` (string, 可选)：写入时提供 Base64 数据
   - `offset` (u64, 可选)：读取起始偏移（字节）
   - `length` (u64, 可选)：读取长度（字节）
@@ -336,7 +352,7 @@ await writeFile("data.xlsx", base64)
 - **消息大小限制**：单条消息最大约 1MB，读取大文件请使用 `readFileWhole` 自动分片。
 - **Base64 开销**：Base64 使体积增加约 33%，分片大小时需考虑。
 - **路径格式**：建议使用文件名（相对路径），避免使用绝对路径。
-- **权限**：主机以用户级权限运行，只能访问当前用户有权限的文件（`.native_message` 目录位于用户主目录下，权限充足）。
+- **权限**：主机以用户级权限运行，只能访问当前用户有权限的文件（数据目录位于 `%LOCALAPPDATA%` 下，权限充足）。请勿在系统中给 EXE 设置“以管理员身份运行”兼容性标志，否则 Chrome 将无法与主机通信。
 
 ---
 
